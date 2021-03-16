@@ -1,0 +1,27 @@
+{
+  "name": "redis-streams-queue",
+  "version": "1.0.0",
+  "description": "Redis Streams Queue",
+  "main": "queue.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/redisq/redisq.git"
+  },
+  "keywords": [
+    "redis",
+    "queue"
+  ],
+  "author": "redisq",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/redisq/redisq/issues"
+  },
+  "homepage": "https://github.com/redisq/redisq#readme",
+  "dependencies": {
+    "ioredis": "^4.24.2",
+    "nanoid": "^3.1.22"
+  }
+}
