@@ -117,7 +117,7 @@ class RedisStreamsQueue {
 
                 pending = await this.redis.xclaim(this.name, this.group, this.consumer, 0, ...claims, 'JUSTID');
 
-                pending.length && this.onClaim && this.onClaim(consumer.name, pending);
+                pending.length && this.onClaim && this.onClaim({ name: this.name, consumer: consumer.name, tasks: pending });
 
                 this.logger.info(`Claimed tasks from ${consumer.name} -> ${this.consumer}: ${pending}`);
 
@@ -234,9 +234,9 @@ class RedisStreamsQueue {
                 errors = errors ? JSON.parse(errors) : 0;
 
                 const worker = ({ message_id, payload, task_id }) => {
-                    return this.worker.constructor.name === 'AsyncFunction' ? this.worker({ message_id, payload, task_id }) : new Promise((resolve, reject) => {
+                    return this.worker.constructor.name === 'AsyncFunction' ? this.worker({ name: this.name, message_id, payload, task_id }) : new Promise((resolve, reject) => {
                         try {
-                            resolve(this.worker({ message_id, payload, task_id }));
+                            resolve(this.worker({ name: this.name, message_id, payload, task_id }));
                         }
                         catch(err) {
                             reject(err);
@@ -272,7 +272,7 @@ class RedisStreamsQueue {
                             .srem(`${this.name}:${DEDUPESET}`, task_id)
                             .exec();
                             
-                        this.onTaskComplete && this.onTaskComplete({ payload: value, options, id: task_id, result });
+                        this.onTaskComplete && this.onTaskComplete({ name: this.name, payload: value, options, task_id, result });
 
                         this.logger.info(`Task ends with "${result}"`);
                     }
@@ -286,7 +286,7 @@ class RedisStreamsQueue {
 
                         this.logger.info(`Task remains as pending "${task_id}"`);
 
-                        this.onTaskPending && this.onTaskPending({ payload: value, options, id: task_id });
+                        this.onTaskPending && this.onTaskPending({ name: this.name, payload: value, options, task_id });
                     }
                 }).catch(async (error) => {
                     error = prettyError(error);
@@ -319,7 +319,7 @@ class RedisStreamsQueue {
 
                         this.logger.error(`Error on task ${stream}.${task_id}`, error);
 
-                        this.onTaskError && this.onTaskError({ error, payload: value, options, id: task_id });
+                        this.onTaskError && this.onTaskError({ name: this.name, error, payload: value, options, task_id });
                     }
                 });
             }
