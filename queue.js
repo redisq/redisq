@@ -292,8 +292,10 @@ class RedisStreamsQueue {
                     error = prettyError(error);
                     
                     errors++;
+                    
+                    const retry = !!((retries === -1) || (retries && (errors < (retries || 0))));
 
-                    if (retries && (errors < (retries || 0))) {
+                    if (retry) {
                         if(retries && options.delay) {
                             this.logger.info(`Delay task: ${task_id}`);
 
