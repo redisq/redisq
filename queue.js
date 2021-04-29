@@ -197,7 +197,7 @@ class RedisStreamsQueue {
             await this.redis.xreadgroup('GROUP', this.group, this.consumer, /* 'BLOCK', 5000,  */'COUNT', this.ID === 0 ? 0 : this.batch_size, 'STREAMS', this.name, this.ID).then(async (data) => {
                 this.ID = '>';
 
-                this._processTasks(data);
+                await this._processTasks(data);
             });
 
             await sleep(this.loop_interval);
