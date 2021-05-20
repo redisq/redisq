@@ -274,7 +274,7 @@ class RedisStreamsQueue {
                             
                         this.onTaskComplete && this.onTaskComplete({ name: this.name, payload: value, options, task_id, result });
 
-                        this.logger.info(`Task "${task_id}" ends with "${result}"`);
+                        this.logger.info(`Task "${task_id}" ends with "${typeof(result) === 'object' ? JSON.stringify(result) : result}"`);
                     }
                     else {
                         if(retries < 0) {
