@@ -195,9 +195,11 @@ class RedisStreamsQueue {
     async _loop() {
         while(this.started) {
             await this.redis.xreadgroup('GROUP', this.group, this.consumer, /* 'BLOCK', 5000,  */'COUNT', this.ID === 0 ? 0 : this.batch_size, 'STREAMS', this.name, this.ID).then(async (data) => {
+                this.stop();
+
                 this.ID = '>';
 
-                await this._processTasks(data);
+                await this._processTasks(data).finally(() => this.start());
             });
 
             await sleep(this.loop_interval);
@@ -264,7 +266,7 @@ class RedisStreamsQueue {
 
                 let retries = options.retries;
 
-                Promise.race(promises).then(async result => {
+                await Promise.race(promises).then(async result => {
                     if(result) {
                         await this.redis.multi()
                             .xack(stream, this.group, id)
