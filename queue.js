@@ -194,12 +194,15 @@ class RedisStreamsQueue {
 
     async _loop() {
         while(this.started) {
-            await this.redis.xreadgroup('GROUP', this.group, this.consumer, /* 'BLOCK', 5000,  */'COUNT', this.ID === 0 ? 0 : this.batch_size, 'STREAMS', this.name, this.ID).then(async (data) => {
-                this.stop();
+            let semaphore = false;
 
-                this.ID = '>';
+            await this.redis.xreadgroup('GROUP', this.group, this.consumer, /* 'BLOCK', this.loop_interval, */ 'COUNT', this.ID === 0 ? 0 : this.batch_size, 'STREAMS', this.name, this.ID).then(async (data) => {
+                if(!semaphore) {
+                    semaphore = true;
+                    this.ID = '>';
 
-                await this._processTasks(data).finally(() => this.start());
+                    await this._processTasks(data).finally(() => semaphore = false);
+                }
             });
 
             await sleep(this.loop_interval);
