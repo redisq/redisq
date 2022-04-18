@@ -140,16 +140,20 @@ class RedisStreamsQueue {
         if(!task_id) {
             await this.redis.xtrim(this.name, 'MAXLEN', 0);
 
-            return await this.redis.del(`${this.name}:${DEDUPESET}`);
+            return this.redis.del(`${this.name}:${DEDUPESET}`);
         }
         else {
             const message_id = await this.redis.get(`${this.name}:TASK:${task_id}`);
 
-            return await this.redis.multi()
+            return this.redis.multi()
                 .xdel(this.name, message_id)
                 .srem(`${this.name}:${DEDUPESET}`, task_id)
                 .exec();
         }
+    }
+
+    length() {
+        return this.redis.xlen(this.name);
     }
 
     async push({ payload = {}, id = taskID(), options = {} }) {
