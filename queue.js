@@ -152,7 +152,7 @@ class RedisStreamsQueue {
         }
     }
 
-    length() {
+    size() {
         return this.redis.xlen(this.name);
     }
 
