@@ -81,7 +81,7 @@ class RedisStreamsQueue {
         this.claim_interval && this.claim();
     }
 
-    async claim() {
+    async claim(force = false) {
         let consumers = await this.redis.xinfo('CONSUMERS', this.name, this.group);
 
         consumers = consumers.reduce((memo, consumer) => {
@@ -92,7 +92,7 @@ class RedisStreamsQueue {
             return memo;
         }, []);
 
-        const expired = consumers.filter(consumer => consumer.idle > this.claim_interval);
+        const expired = force ? consumers : consumers.filter(consumer => consumer.idle > this.claim_interval);
 
         for(let consumer of expired) {
             if(consumer.name !== this.consumer && consumer.pending > 0) {
@@ -160,9 +160,11 @@ class RedisStreamsQueue {
         if(!exists) {
             this.logger.info(`Pushed task:`, this.name, id);
 
-            const message_id = await COMMANDS.xadd({ redis: this.redis, stream: this.name, length: this.length, payload, options, id });
+            const message_id = await COMMANDS.xadd({ redis: this.redis, stream: this.name, length: this.length, payload, options, id }).then(async (message_id) => {
+                await this.redis.set(`${this.name}:TASK:${id}`, message_id);
 
-            await this.redis.set(`${this.name}:TASK:${id}`, message_id);
+                return message_id;
+            });
 
             return message_id;
         }
