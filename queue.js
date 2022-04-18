@@ -39,7 +39,8 @@ class RedisStreamsQueue {
         consumer, 
         redis = new Redis(process.env.REDIS), 
         length = 10000,
-        logger = console, 
+        logger, 
+        //logger = console, 
         worker = async () => void 0, 
         batch_size = 10,
         claim_interval = 1000 * 60 * 60,
@@ -56,7 +57,15 @@ class RedisStreamsQueue {
 
         this.redis = redis;
         this.length = length;
-        this.logger = logger;
+        this.logger = logger || {
+            info() {},
+            log() {},
+            error() {},
+            debug() {},
+            fatal() {},
+            trace() {},
+            warn() {}
+        };
         /* this.concurency = concurency; */ // CONCYRENCY CAN BE MADE BY CREATING MULTIPLY INSTANCES WITH THE SAME NAMES
         this.batch_size = batch_size;
 
