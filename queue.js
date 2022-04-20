@@ -194,6 +194,9 @@ class RedisStreamsQueue {
             this.started = false;
             this.start();
         }
+        else {
+            this.start();
+        }
     }
 
     start() {
@@ -286,13 +289,14 @@ class RedisStreamsQueue {
 
                 await Promise.race(promises).then(async result => {
                     if(result) {
-                        await this.redis.multi()
+                        const [, , , [, size]] = await this.redis.multi()
                             .xack(stream, this.group, id)
                             .xdel(stream, id)
                             .srem(`${this.name}:${DEDUPESET}`, task_id)
+                            .xlen(this.name)
                             .exec();
                             
-                        this.onTaskComplete && this.onTaskComplete({ name: this.name, payload: value, options, task_id, result });
+                        this.onTaskComplete && this.onTaskComplete({ name: this.name, payload: value, options, task_id, result, size });
 
                         this.logger.info(`Task "${task_id}" ends with "${typeof(result) === 'object' ? JSON.stringify(result) : result}"`);
                     }
