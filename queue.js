@@ -38,7 +38,7 @@ class RedisStreamsQueue {
         group, 
         consumer, 
         redis = new Redis(process.env.REDIS), 
-        length = 10000,
+        length = 1000000,
         logger, 
         //logger = console, 
         worker = async () => void 0, 
@@ -47,6 +47,7 @@ class RedisStreamsQueue {
         loop_interval = 5000,
         onTaskComplete,
         onTaskError,
+        onTaskFinal,
         onTaskPending,
         onClaim
      }) {
@@ -72,6 +73,7 @@ class RedisStreamsQueue {
         this.worker = worker;
         this.onTaskComplete = onTaskComplete;
         this.onTaskError = onTaskError;
+        this.onTaskFinal = onTaskFinal;
         this.onTaskPending = onTaskPending;
         this.onClaim = onClaim;
 
@@ -90,7 +92,7 @@ class RedisStreamsQueue {
         this.claim_interval && this.claim();
     }
 
-    async claim(force = false) {
+    async claim({ force = false }) {
         let consumers = await this.redis.xinfo('CONSUMERS', this.name, this.group);
 
         consumers = consumers.reduce((memo, consumer) => {
@@ -139,6 +141,26 @@ class RedisStreamsQueue {
                 if(pending_count > 0) {
                     this.logger.warn(`Consumer ${consumer.name} had pending messages!`);
                 }
+
+                this.logger.info(`Consumer deleted: ${consumer.name}`);
+            }
+        }
+    }
+
+    async clearConsumers({ force = false }) {
+        let consumers = await this.redis.xinfo('CONSUMERS', this.name, this.group);
+
+        consumers = consumers.reduce((memo, consumer) => {
+            let [, name,, pending,, idle] = consumer;
+
+            memo.push({ name, pending, idle });
+
+            return memo;
+        }, []);
+
+        for(let consumer of consumers) {
+            if(consumer.name !== this.consumer && (!consumer.pending || force)) {
+                const pending_count = await this.redis.xgroup('DELCONSUMER', this.name, this.group, consumer.name);
 
                 this.logger.info(`Consumer deleted: ${consumer.name}`);
             }
@@ -296,7 +318,9 @@ class RedisStreamsQueue {
                             .xlen(this.name)
                             .exec();
                             
-                        this.onTaskComplete && this.onTaskComplete({ name: this.name, payload: value, options, task_id, result, size });
+                        this.onTaskComplete && this.onTaskComplete({ name: this.name, group: this.group, consumer: this.consumer, payload: value, options, task_id, result, size });
+
+                        this.onTaskFinal && this.onTaskFinal({ name: this.name, group: this.group, consumer: this.consumer, payload: value, options, task_id, result, size });
 
                         this.logger.info(`Task "${task_id}" ends with "${typeof(result) === 'object' ? JSON.stringify(result) : result}"`);
                     }
@@ -336,16 +360,19 @@ class RedisStreamsQueue {
 
                         await this.redis.set(`${this.name}:TASK:${task_id}`, message_id);
                     } else {
-                        await this.redis
+                        const [, , , [, size]] = await this.redis
                             .multi()
                             .xack(stream, this.group, id)
                             .xdel(stream, id)
                             .srem(`${this.name}:${DEDUPESET}`, task_id)
+                            .xlen(this.name)
                             .exec();
 
                         this.logger.error(`Error on task ${stream}.${task_id}`, error);
 
-                        this.onTaskError && this.onTaskError({ name: this.name, error, payload: value, options, task_id });
+                        this.onTaskError && this.onTaskError({ name: this.name, group: this.group, consumer: this.consumer, error, payload: value, options, task_id, size });
+                        
+                        this.onTaskFinal && this.onTaskFinal({ name: this.name, group: this.group, consumer: this.consumer, error, payload: value, options, task_id, size });
                     }
                 });
             }
