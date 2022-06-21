@@ -38,14 +38,16 @@ class RedisStreamsQueue {
         group, 
         consumer, 
         redis = new Redis(process.env.REDIS), 
-        length = 10000,
-        logger = console, 
+        length = 1000000,
+        logger, 
+        //logger = console, 
         worker = async () => void 0, 
         batch_size = 10,
         claim_interval = 1000 * 60 * 60,
         loop_interval = 5000,
         onTaskComplete,
         onTaskError,
+        onTaskFinal,
         onTaskPending,
         onClaim
      }) {
@@ -56,13 +58,22 @@ class RedisStreamsQueue {
 
         this.redis = redis;
         this.length = length;
-        this.logger = logger;
+        this.logger = logger || {
+            info() {},
+            log() {},
+            error() {},
+            debug() {},
+            fatal() {},
+            trace() {},
+            warn() {}
+        };
         /* this.concurency = concurency; */ // CONCYRENCY CAN BE MADE BY CREATING MULTIPLY INSTANCES WITH THE SAME NAMES
         this.batch_size = batch_size;
 
         this.worker = worker;
         this.onTaskComplete = onTaskComplete;
         this.onTaskError = onTaskError;
+        this.onTaskFinal = onTaskFinal;
         this.onTaskPending = onTaskPending;
         this.onClaim = onClaim;
 
@@ -81,7 +92,7 @@ class RedisStreamsQueue {
         this.claim_interval && this.claim();
     }
 
-    async claim() {
+    async claim({ force = false }) {
         let consumers = await this.redis.xinfo('CONSUMERS', this.name, this.group);
 
         consumers = consumers.reduce((memo, consumer) => {
@@ -92,7 +103,7 @@ class RedisStreamsQueue {
             return memo;
         }, []);
 
-        const expired = consumers.filter(consumer => consumer.idle > this.claim_interval);
+        const expired = force ? consumers : consumers.filter(consumer => consumer.idle > this.claim_interval);
 
         for(let consumer of expired) {
             if(consumer.name !== this.consumer && consumer.pending > 0) {
@@ -136,20 +147,44 @@ class RedisStreamsQueue {
         }
     }
 
+    async clearConsumers({ force = false }) {
+        let consumers = await this.redis.xinfo('CONSUMERS', this.name, this.group);
+
+        consumers = consumers.reduce((memo, consumer) => {
+            let [, name,, pending,, idle] = consumer;
+
+            memo.push({ name, pending, idle });
+
+            return memo;
+        }, []);
+
+        for(let consumer of consumers) {
+            if(consumer.name !== this.consumer && (!consumer.pending || force)) {
+                const pending_count = await this.redis.xgroup('DELCONSUMER', this.name, this.group, consumer.name);
+
+                this.logger.info(`Consumer deleted: ${consumer.name}`);
+            }
+        }
+    }
+
     async clear(task_id) {
         if(!task_id) {
             await this.redis.xtrim(this.name, 'MAXLEN', 0);
 
-            return await this.redis.del(`${this.name}:${DEDUPESET}`);
+            return this.redis.del(`${this.name}:${DEDUPESET}`);
         }
         else {
             const message_id = await this.redis.get(`${this.name}:TASK:${task_id}`);
 
-            return await this.redis.multi()
+            return this.redis.multi()
                 .xdel(this.name, message_id)
                 .srem(`${this.name}:${DEDUPESET}`, task_id)
                 .exec();
         }
+    }
+
+    size() {
+        return this.redis.xlen(this.name);
     }
 
     async push({ payload = {}, id = taskID(), options = {} }) {
@@ -160,9 +195,11 @@ class RedisStreamsQueue {
         if(!exists) {
             this.logger.info(`Pushed task:`, this.name, id);
 
-            const message_id = await COMMANDS.xadd({ redis: this.redis, stream: this.name, length: this.length, payload, options, id });
+            const message_id = await COMMANDS.xadd({ redis: this.redis, stream: this.name, length: this.length, payload, options, id }).then(async (message_id) => {
+                await this.redis.set(`${this.name}:TASK:${id}`, message_id);
 
-            await this.redis.set(`${this.name}:TASK:${id}`, message_id);
+                return message_id;
+            });
 
             return message_id;
         }
@@ -177,6 +214,9 @@ class RedisStreamsQueue {
         if(this.started) {
             this.ID = 0;
             this.started = false;
+            this.start();
+        }
+        else {
             this.start();
         }
     }
@@ -271,13 +311,16 @@ class RedisStreamsQueue {
 
                 await Promise.race(promises).then(async result => {
                     if(result) {
-                        await this.redis.multi()
+                        const [, , , [, size]] = await this.redis.multi()
                             .xack(stream, this.group, id)
                             .xdel(stream, id)
                             .srem(`${this.name}:${DEDUPESET}`, task_id)
+                            .xlen(this.name)
                             .exec();
                             
-                        this.onTaskComplete && this.onTaskComplete({ name: this.name, payload: value, options, task_id, result });
+                        this.onTaskComplete && this.onTaskComplete({ name: this.name, group: this.group, consumer: this.consumer, payload: value, options, task_id, result, size });
+
+                        this.onTaskFinal && this.onTaskFinal({ name: this.name, group: this.group, consumer: this.consumer, payload: value, options, task_id, result, size });
 
                         this.logger.info(`Task "${task_id}" ends with "${typeof(result) === 'object' ? JSON.stringify(result) : result}"`);
                     }
@@ -317,16 +360,19 @@ class RedisStreamsQueue {
 
                         await this.redis.set(`${this.name}:TASK:${task_id}`, message_id);
                     } else {
-                        await this.redis
+                        const [, , , [, size]] = await this.redis
                             .multi()
                             .xack(stream, this.group, id)
                             .xdel(stream, id)
                             .srem(`${this.name}:${DEDUPESET}`, task_id)
+                            .xlen(this.name)
                             .exec();
 
                         this.logger.error(`Error on task ${stream}.${task_id}`, error);
 
-                        this.onTaskError && this.onTaskError({ name: this.name, error, payload: value, options, task_id });
+                        this.onTaskError && this.onTaskError({ name: this.name, group: this.group, consumer: this.consumer, error, payload: value, options, task_id, size });
+                        
+                        this.onTaskFinal && this.onTaskFinal({ name: this.name, group: this.group, consumer: this.consumer, error, payload: value, options, task_id, size });
                     }
                 });
             }
