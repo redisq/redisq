@@ -92,7 +92,7 @@ class RedisStreamsQueue {
         this.claim_interval && this.claim();
     }
 
-    async claim({ force = false }) {
+    async claim({ force = false } = {}) {
         let consumers = await this.redis.xinfo('CONSUMERS', this.name, this.group);
 
         consumers = consumers.reduce((memo, consumer) => {
