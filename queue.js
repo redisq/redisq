@@ -43,6 +43,7 @@ class RedisStreamsQueue {
         //logger = console, 
         worker = async () => void 0, 
         batch_size = 10,
+        batch_sync = true,
         claim_interval = 1000 * 60 * 60,
         loop_interval = 5000,
         onTaskComplete,
@@ -69,6 +70,7 @@ class RedisStreamsQueue {
         };
         /* this.concurency = concurency; */ // CONCYRENCY CAN BE MADE BY CREATING MULTIPLY INSTANCES WITH THE SAME NAMES
         this.batch_size = batch_size;
+        this.batch_sync = batch_sync;
 
         this.worker = worker;
         this.onTaskComplete = onTaskComplete;
@@ -241,7 +243,12 @@ class RedisStreamsQueue {
                     semaphore = true;
                     this.ID = '>';
 
-                    await this._processTasks(data).finally(() => semaphore = false);
+                    if(this.batch_sync) {
+                        await this._processTasks(data).finally(() => semaphore = false);
+                    }
+                    else {
+                        this._processTasks(data).finally(() => semaphore = false);
+                    }
                 }
             });
 
