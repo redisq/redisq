@@ -1,10 +1,14 @@
 "use strict";
 
+"use strict";
+
 const { customAlphabet } = require('nanoid');
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const taskID = customAlphabet(alphabet, 32);
 
 const Redis = require('ioredis');
+
+const Validator = require("fastest-validator");
 
 const NAMESPACE = 'QUEUE';
 const DEDUPESET = 'DEDUPE';
@@ -26,6 +30,345 @@ const prettyError = (error) => {
     return result;
 };
 
+class Event {
+    constructor({ schema, payload }) {
+        this.schema = schema;
+        this.payload = payload;
+        this.options = schema.options;
+
+        this.validate();
+    }
+
+    validate() {
+        if(this.schema.validation) {
+            //validate payload
+            const v = new Validator();
+
+            const check = v.compile(this.schema.validation);
+
+            const valid = check(this.payload);
+
+            if(valid !== true) {
+                throw { code: 422, message: valid };
+            }
+        }
+    }
+}
+class EventRegistry {
+    constructor() {
+        this.schemas = {};
+
+        this.add({
+            version: 1,
+            validation: {/* fatest-validator scheme */},
+            streams: ['*'],
+        });
+    }
+
+    schema(name) {
+        const found = this.schemas[name];
+
+        if(!found) {
+            throw { code: 404, message: `Schema "${name}" not found.` };
+        }
+
+        return found;
+    }
+
+    add(schema) {
+        const { version = 1, name, validation, options = {} } = schema;
+
+        const parsed = {
+            version, 
+            name: name || 'default',
+            validation: validation || {},
+            options: { timeout: 5000, delay: 0, retries: 0, ...options }
+        };
+
+        this.schemas[parsed.name] = parsed;
+    }
+
+    remove(schema) {
+        const name = schema.name || schema;
+
+        this.schemas[name] = void 0;
+    }
+}
+
+class RedisStreams {
+    constructor({ 
+        redis = new Redis(process.env.REDIS), 
+        length = 1000000,
+        logger, 
+        worker = async () => void 0, 
+        batch_size = 10,
+        batch_sync = true,
+        reclaim_interval = 0,
+        loop_interval = 5000,
+        onEvent,
+        registry = {}
+     }) {
+        this.registry = registry;
+
+        this.streams = {};
+
+        this.redis = redis;
+        this.length = length;
+        this.logger = logger || {
+            info() {},
+            log() {},
+            error() {},
+            debug() {},
+            fatal() {},
+            trace() {},
+            warn() {}
+        };
+        /* this.concurency = concurency; */ // CONCYRENCY CAN BE MADE BY CREATING MULTIPLY INSTANCES WITH THE SAME NAMES
+        this.batch_size = batch_size;
+        this.batch_sync = batch_sync;
+
+        this.worker = worker;
+        this.onEvent = onEvent;
+
+        this.started = false;
+        this.ID = 0;
+
+        this.loop_interval = loop_interval;
+        this.reclaim_interval = reclaim_interval;
+
+        if(this.reclaim_interval) {
+            if(this.reclaim_interval < 1000) {
+                this.reclaim_interval = 1000;
+            }
+
+            setInterval(() => {
+                this.reclaim();
+            }, this.reclaim_interval);
+        }
+    }
+
+    async reclaim({ stream }) {
+        const { pending, groups } = await this.size({ stream });
+
+        if(pending) {
+            for(const group of groups) {
+                if(group.pending) {
+                    const events = await this.redis.xpending(stream, group.name, '-', '+', this.batch_size);
+
+                    for(const event of events) {
+                        const [id, consumer, /*idle, delivered */] = event;
+
+                        const [[message_id, entries] = []] = await this.redis.xrange(stream, id, id);
+
+
+                        if(message_id) {
+                            const data = [[stream, [[message_id, entries]]]];
+        
+                            this._process({ stream, group: group.name, consumer, data });
+                        }
+                        else {
+                            await this.redis
+                                .multi()
+                                .xack(stream, group.name, id)
+                                //.xdel(stream, id)
+                                .exec();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    clear({ stream }) {
+        return this.redis.multi()
+            .del(stream)
+            .del(`${stream}:${DEDUPESET}`)
+            .exec();
+    }
+
+    async size({ stream }) {
+        const [[, size], [, groups = []]] = await this.redis.multi()
+            .xlen(stream)
+            .xinfo('GROUPS', stream)
+            .exec();
+
+        const info = groups.reduce((memo, group) => {
+            const entries = [];
+
+            while (group.length) {
+                const [key, value] = group.splice(0, 2);
+
+                entries.push([key, value]);
+            }
+
+            group = Object.fromEntries(entries);
+            //const [, , , , , pending] = group;
+
+            memo.pending += group.pending
+            memo.groups.push(group);
+
+            return memo;
+        }, { pending: 0, groups: [] });
+
+        return { size, ...info };
+    }
+
+    async push({ stream, id = Date.now(), event }) {
+        const { schema, payload, options } = event;
+
+        const exists = !await this.redis.sadd(`${stream}:${DEDUPESET}`, id);
+
+        if(!exists) {
+            payload.$system = { schema: { name: schema.name, version: schema.version }, created: Date.now() };
+
+            return this.redis.xadd(stream, '*', 'payload', JSON.stringify(payload), 'options', JSON.stringify(options), 'id', id);
+            //return this.redis.xadd(stream, /* 'MAXLEN', '~', this.length,  */'*', 'payload', JSON.stringify(payload), 'options', JSON.stringify(options), 'id', id);
+        }
+
+        //await this.redis.srem(`${stream}:${DEDUPESET}`, id);
+
+        return false;
+    }
+
+    async _process({ stream, group, consumer, data }) {
+        data = data || [[]];
+
+        const [[, messages = []]] = data;
+
+        for(const message of messages) {
+            const [message_id, entries] = message;
+
+            if(!entries) {
+                await this.redis.xack(stream, group, message_id);
+
+                continue;
+            }
+
+            let [, payload, , options, , task_id, , errors] = entries || [];
+
+            try {
+                payload = JSON.parse(payload);
+
+                options = options ? JSON.parse(options) : {};
+                errors = errors ? JSON.parse(errors) : 0;
+            }
+            catch {
+            }
+
+            const worker = ({ stream, group, consumer, message_id, payload, task_id, options, errors }) => {
+                return new Promise((resolve, reject) => {
+                    if(options.timeout) {
+                        const timer = setTimeout(() => {
+                            clearTimeout(timer);
+
+                            reject({
+                                code: 500,
+                                message: `Task timed out after ${options.timeout} ms.`,
+                            });
+                        }, options.timeout);
+                    }
+
+                    this.worker({ stream, group, consumer, message_id, payload, task_id, options, errors }).then(result => {
+                        resolve(result);
+                    }).catch(error => {
+                        reject(error)
+                    });
+                });
+            };
+
+            let retries = options.retries;
+
+            await worker({ stream, group, consumer, message_id, payload, task_id, options, errors }).then(async result => {
+                const [, , [, size], [, [pending]]] = await this.redis
+                    .multi()
+                    .xack(stream, group, message_id)
+                    //.xdel(stream, message_id)
+                    .srem(`${stream}:${DEDUPESET}`, task_id)
+                    .xlen(stream)
+                    .xpending(stream, group)
+                    .exec();
+                    
+                this.onEvent({ event: 'COMPLETE', result, stream, group, consumer, message_id, payload, task_id, options, errors, size, pending });
+            }).catch(async (error) => {
+                error = prettyError(error);
+                
+                errors++;
+                
+                const retry = retries > 0 ? retries - errors  : 0;
+
+                if (retry > 0) {
+                    entries.includes('errors') && entries.splice(-2);
+                    entries.push('errors');
+                    entries.push(errors);
+
+                    const filtered = [[stream, [[message_id, entries]]]];
+
+                    if(options.delay) {
+                        sleep(options.delay).then(() => {
+                            this._process({ stream, group, consumer, data: filtered });
+                        });
+                    }
+                    else {
+                        this._process({ stream, group, consumer, data: filtered });
+                    }
+
+                } 
+                else {
+                    const [, , [, size], [, [pending]]] = await this.redis
+                        .multi()
+                        .xack(stream, group, message_id)
+                        //.xdel(stream, message_id)
+                        .srem(`${stream}:${DEDUPESET}`, task_id)
+                        .xlen(stream)
+                        .xpending(stream, group)
+                        .exec();
+
+                    this.onEvent({ event: 'ERROR', error, stream, group, consumer, message_id, payload, task_id, options, errors, size, pending });
+                }
+            });
+        }
+    }
+
+    async go({ stream, group, consumer, id: pointer, timeout }) {
+
+        while(this.streams[`${stream}.${group}.${consumer}`]) {
+
+            await this.redis.xreadgroup('GROUP', group, consumer, 'COUNT', this.batch_size, 'STREAMS', stream, pointer).then(async (data) => {
+                pointer = '>';
+
+                if(this.batch_sync) {
+                    await this._process({ stream, group, consumer, data });
+                }
+                else {
+                    this._process({ stream, group, consumer, data });
+                }
+            });
+
+            await sleep(timeout || this.loop_interval);
+        }
+    }
+
+    async listen({ stream, group, consumer, id = 0, timeout }) {
+        const start = () => {
+            this.go({ stream, group, consumer, id, timeout });
+
+            return () => this.streams[`${stream}.${group}.${consumer}`] = false;
+        };
+
+        this.streams[`${stream}.${group}.${consumer}`] = true;
+
+        return this.redis.xgroup('CREATE', stream, group, 0, 'MKSTREAM')
+            .then(() => {
+                return start();
+            })
+            .catch(error => {
+                return start();
+            });
+
+    }
+}
+
+
 const COMMANDS = {
     xadd({ redis, stream, length, payload, options, id }) {
         return redis.xadd(stream, 'MAXLEN', '~', length, '*', 'payload', JSON.stringify(payload), 'options', JSON.stringify(options), 'id', id);
@@ -43,6 +386,7 @@ class RedisStreamsQueue {
         //logger = console, 
         worker = async () => void 0, 
         batch_size = 10,
+        batch_sync = true,
         claim_interval = 1000 * 60 * 60,
         loop_interval = 5000,
         onTaskComplete,
@@ -69,6 +413,7 @@ class RedisStreamsQueue {
         };
         /* this.concurency = concurency; */ // CONCYRENCY CAN BE MADE BY CREATING MULTIPLY INSTANCES WITH THE SAME NAMES
         this.batch_size = batch_size;
+        this.batch_sync = batch_sync;
 
         this.worker = worker;
         this.onTaskComplete = onTaskComplete;
@@ -92,7 +437,7 @@ class RedisStreamsQueue {
         this.claim_interval && this.claim();
     }
 
-    async claim({ force = false }) {
+    async claim({ force = false } = {}) {
         let consumers = await this.redis.xinfo('CONSUMERS', this.name, this.group);
 
         consumers = consumers.reduce((memo, consumer) => {
@@ -241,7 +586,12 @@ class RedisStreamsQueue {
                     semaphore = true;
                     this.ID = '>';
 
-                    await this._processTasks(data).finally(() => semaphore = false);
+                    if(this.batch_sync) {
+                        await this._processTasks(data).finally(() => semaphore = false);
+                    }
+                    else {
+                        this._processTasks(data).finally(() => semaphore = false);
+                    }
                 }
             });
 
@@ -381,5 +731,9 @@ class RedisStreamsQueue {
 }
 
 module.exports = {
+    Event,
+    EventRegistry,
+    RedisStreams,
+
     RedisStreamsQueue
 };
