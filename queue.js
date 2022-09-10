@@ -1,14 +1,10 @@
 "use strict";
 
-"use strict";
-
 const { customAlphabet } = require('nanoid');
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const taskID = customAlphabet(alphabet, 32);
 
 const Redis = require('ioredis');
-
-const Validator = require("fastest-validator");
 
 const NAMESPACE = 'QUEUE';
 const DEDUPESET = 'DEDUPE';
@@ -30,86 +26,18 @@ const prettyError = (error) => {
     return result;
 };
 
-class Event {
-    constructor({ schema, payload }) {
-        this.schema = schema;
-        this.payload = payload;
-        this.options = schema.options;
-
-        this.validate();
-    }
-
-    validate() {
-        if(this.schema.validation) {
-            //validate payload
-            const v = new Validator();
-
-            const check = v.compile(this.schema.validation);
-
-            const valid = check(this.payload);
-
-            if(valid !== true) {
-                throw { code: 422, message: valid };
-            }
-        }
-    }
-}
-class EventRegistry {
-    constructor() {
-        this.schemas = {};
-
-        this.add({
-            version: 1,
-            validation: {/* fatest-validator scheme */},
-            streams: ['*'],
-        });
-    }
-
-    schema(name) {
-        const found = this.schemas[name];
-
-        if(!found) {
-            throw { code: 404, message: `Schema "${name}" not found.` };
-        }
-
-        return found;
-    }
-
-    add(schema) {
-        const { version = 1, name, validation, options = {} } = schema;
-
-        const parsed = {
-            version, 
-            name: name || 'default',
-            validation: validation || {},
-            options: { timeout: 5000, delay: 0, retries: 0, ...options }
-        };
-
-        this.schemas[parsed.name] = parsed;
-    }
-
-    remove(schema) {
-        const name = schema.name || schema;
-
-        this.schemas[name] = void 0;
-    }
-}
-
 class RedisStreams {
     constructor({ 
         redis = new Redis(process.env.REDIS), 
         length = 1000000,
         logger, 
-        worker = async () => void 0, 
+        worker = () => void 0, 
         batch_size = 10,
         batch_sync = true,
         reclaim_interval = 0,
         loop_interval = 5000,
-        onEvent,
-        registry = {}
-     }) {
-        this.registry = registry;
-
+        onEvent= () => void 0,
+     } = {}) {
         this.streams = {};
 
         this.redis = redis;
@@ -159,7 +87,6 @@ class RedisStreams {
                         const [id, consumer, /*idle, delivered */] = event;
 
                         const [[message_id, entries] = []] = await this.redis.xrange(stream, id, id);
-
 
                         if(message_id) {
                             const data = [[stream, [[message_id, entries]]]];
@@ -213,10 +140,11 @@ class RedisStreams {
         return { size, ...info };
     }
 
-    async push({ stream, id = Date.now(), event }) {
-        const { schema, payload, options } = event;
+    async push({ stream, id = taskID(), event, dedupe = true }) {
+        const { schema, payload } = event;
+        const { options } = schema;
 
-        const exists = !await this.redis.sadd(`${stream}:${DEDUPESET}`, id);
+        const exists = dedupe ? !await this.redis.sadd(`${stream}:${DEDUPESET}`, id) : false;
 
         if(!exists) {
             payload.$system = { schema: { name: schema.name, version: schema.version }, created: Date.now() };
@@ -255,7 +183,10 @@ class RedisStreams {
             catch {
             }
 
-            const worker = ({ stream, group, consumer, message_id, payload, task_id, options, errors }) => {
+            const { $system: { created, schema }, ...rest } = payload;
+            const event = { id: task_id, schema: { ...schema, options }, payload: rest, created };
+
+            const worker = ({ stream, group, consumer, message_id, event, errors }) => {
                 return new Promise((resolve, reject) => {
                     if(options.timeout) {
                         const timer = setTimeout(() => {
@@ -268,7 +199,12 @@ class RedisStreams {
                         }, options.timeout);
                     }
 
-                    this.worker({ stream, group, consumer, message_id, payload, task_id, options, errors }).then(result => {
+                    const worker = new Promise(resolve => {
+                        resolve(this.worker({ stream, group, consumer, message_id, event, errors }));
+                        //resolve(this.worker({ stream, group, consumer, message_id, payload, task_id, options, errors }));
+                    });
+
+                    worker.then(result => {
                         resolve(result);
                     }).catch(error => {
                         reject(error)
@@ -278,7 +214,7 @@ class RedisStreams {
 
             let retries = options.retries;
 
-            await worker({ stream, group, consumer, message_id, payload, task_id, options, errors }).then(async result => {
+            await worker({ stream, group, consumer, message_id, event, errors }).then(async result => {
                 const [, , [, size], [, [pending]]] = await this.redis
                     .multi()
                     .xack(stream, group, message_id)
@@ -288,7 +224,7 @@ class RedisStreams {
                     .xpending(stream, group)
                     .exec();
                     
-                this.onEvent({ event: 'COMPLETE', result, stream, group, consumer, message_id, payload, task_id, options, errors, size, pending });
+                this.onEvent({ state: 'COMPLETE', result, stream, group, consumer, message_id, event, errors, size, pending });
             }).catch(async (error) => {
                 error = prettyError(error);
                 
@@ -323,7 +259,7 @@ class RedisStreams {
                         .xpending(stream, group)
                         .exec();
 
-                    this.onEvent({ event: 'ERROR', error, stream, group, consumer, message_id, payload, task_id, options, errors, size, pending });
+                    this.onEvent({ state: 'ERROR', error, stream, group, consumer, message_id, event, errors, size, pending });
                 }
             });
         }
@@ -731,8 +667,6 @@ class RedisStreamsQueue {
 }
 
 module.exports = {
-    Event,
-    EventRegistry,
     RedisStreams,
 
     RedisStreamsQueue
