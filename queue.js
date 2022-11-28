@@ -36,7 +36,7 @@ class RedisStreams {
         batch_sync = true,
         reclaim_interval = 0,
         loop_interval = 5000,
-        onEvent = () => void 0,
+        onComplete = () => void 0,
      } = {}) {
         this.streams = {};
 
@@ -56,7 +56,7 @@ class RedisStreams {
         this.batch_sync = batch_sync;
 
         this.worker = worker;
-        this.onEvent = onEvent;
+        this.onComplete = onComplete;
 
         this.started = false;
         this.ID = 0;
@@ -234,7 +234,7 @@ class RedisStreams {
             let retries = options.retries;
 
             await worker({ stream, group, consumer, message_id, event, errors }).then(async result => {
-                const data = await this.redis
+                const [, , [, size], , [, [pending]]] = await this.redis
                         .multi()
                         .xack(stream, group, message_id)
                         //.xdel(stream, message_id)
@@ -244,9 +244,7 @@ class RedisStreams {
                         .xpending(stream, group)
                         .exec();
 
-                const [, , [, size], , [, [pending]]] = data;
-
-                this.onEvent({ state: 'COMPLETE', result, stream, group, consumer, message_id, event, errors, size, pending });
+                this.onComplete({ state: 'COMPLETE', result, stream, group, consumer, message_id, event, errors, size, pending });
             }).catch(async (error) => {
                 error = prettyError(error);
                 
@@ -282,7 +280,7 @@ class RedisStreams {
                         .xpending(stream, group)
                         .exec();
 
-                    this.onEvent({ state: 'ERROR', error, stream, group, consumer, message_id, event, errors, size, pending });
+                    this.onComplete({ state: 'ERROR', error, stream, group, consumer, message_id, event, errors, size, pending });
                 }
             });
         }
@@ -302,7 +300,7 @@ class RedisStreams {
                     this._process({ stream, group, consumer, data });
                 }
             }).catch(error => {
-                this.streams[`${stream}.${group}.${consumer}`] = false;
+                this.redis.xgroup('CREATE', stream, group, 0);
             });
 
             await sleep(timeout || this.loop_interval);
