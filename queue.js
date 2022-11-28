@@ -110,6 +110,8 @@ class RedisStreams {
         return this.redis.multi()
             .del(stream)
             .del(`${stream}:${DEDUPESET}`)
+            .xgroup('CREATE', stream, 'NEO', 0, 'MKSTREAM')
+            .xgroup('DESTROY', stream, 'NEO')
             .exec();
     }
 
@@ -232,15 +234,18 @@ class RedisStreams {
             let retries = options.retries;
 
             await worker({ stream, group, consumer, message_id, event, errors }).then(async result => {
-                const [, , [, size], [, [pending]]] = await this.redis
-                    .multi()
-                    .xack(stream, group, message_id)
-                    //.xdel(stream, message_id)
-                    .srem(`${stream}:${DEDUPESET}`, task_id)
-                    .xlen(stream)
-                    .xpending(stream, group)
-                    .exec();
-                    
+                const data = await this.redis
+                        .multi()
+                        .xack(stream, group, message_id)
+                        //.xdel(stream, message_id)
+                        .srem(`${stream}:${DEDUPESET}`, task_id)
+                        .xlen(stream)
+                        .xgroup('CREATE', stream, group, 0)
+                        .xpending(stream, group)
+                        .exec();
+
+                const [, , [, size], , [, [pending]]] = data;
+
                 this.onEvent({ state: 'COMPLETE', result, stream, group, consumer, message_id, event, errors, size, pending });
             }).catch(async (error) => {
                 error = prettyError(error);
@@ -267,12 +272,13 @@ class RedisStreams {
 
                 } 
                 else {
-                    const [, , [, size], [, [pending]]] = await this.redis
+                    const [, , [, size], , [, [pending]]] = await this.redis
                         .multi()
                         .xack(stream, group, message_id)
                         //.xdel(stream, message_id)
                         .srem(`${stream}:${DEDUPESET}`, task_id)
                         .xlen(stream)
+                        .xgroup('CREATE', stream, group, 0)
                         .xpending(stream, group)
                         .exec();
 
@@ -295,6 +301,8 @@ class RedisStreams {
                 else {
                     this._process({ stream, group, consumer, data });
                 }
+            }).catch(error => {
+                this.streams[`${stream}.${group}.${consumer}`] = false;
             });
 
             await sleep(timeout || this.loop_interval);
