@@ -36,7 +36,7 @@ class RedisStreams {
         batch_sync = true,
         reclaim_interval = 0,
         loop_interval = 5000,
-        onEvent= () => void 0,
+        onEvent = () => void 0,
      } = {}) {
         this.streams = {};
 
@@ -111,6 +111,23 @@ class RedisStreams {
             .del(stream)
             .del(`${stream}:${DEDUPESET}`)
             .exec();
+    }
+
+    async list() {
+        let streams = [];
+        let cursor = '0';
+
+        while(cursor) {
+            let keys = [];
+
+            [cursor, keys] = await this.redis.scan(cursor, 'TYPE', 'stream');
+            
+            cursor = +cursor;
+
+            streams = [...streams, ...keys];
+        }
+
+        return streams;
     }
 
     async size({ stream }) {
