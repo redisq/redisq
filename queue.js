@@ -234,17 +234,32 @@ class RedisStreams {
             let retries = options.retries;
 
             await worker({ stream, group, consumer, message_id, event, errors }).then(async result => {
-                const [, , [, size], , [, [pending]]] = await this.redis
-                        .multi()
-                        .xack(stream, group, message_id)
-                        //.xdel(stream, message_id)
-                        .srem(`${stream}:${DEDUPESET}`, task_id)
-                        .xlen(stream)
-                        .xgroup('CREATE', stream, group, 0)
-                        .xpending(stream, group)
-                        .exec();
+                if (result === false) {
+                    const filtered = [[stream, [[message_id, entries]]]];
 
-                this.onComplete({ state: 'COMPLETE', result, stream, group, consumer, message_id, event, errors, size, pending });
+                    if(options.delay) {
+                        sleep(options.delay).then(() => {
+                            this._process({ stream, group, consumer, data: filtered });
+                        });
+                    }
+                    else {
+                        this._process({ stream, group, consumer, data: filtered });
+                    }
+
+                }
+                else {
+                    const [, , [, size], , [, [pending]]] = await this.redis
+                    .multi()
+                    .xack(stream, group, message_id)
+                    //.xdel(stream, message_id)
+                    .srem(`${stream}:${DEDUPESET}`, task_id)
+                    .xlen(stream)
+                    .xgroup('CREATE', stream, group, 0)
+                    .xpending(stream, group)
+                    .exec();
+
+                    this.onComplete({ state: 'COMPLETE', result, stream, group, consumer, message_id, event, errors, size, pending });
+                }
             }).catch(async (error) => {
                 error = prettyError(error);
                 
