@@ -36,6 +36,7 @@ class RedisStreams {
         batch_sync = true,
         reclaim_interval = 0,
         loop_interval = 5000,
+        delete_event = true,
         onComplete = () => void 0,
      } = {}) {
         this.streams = {};
@@ -54,6 +55,7 @@ class RedisStreams {
         /* this.concurency = concurency; */ // CONCYRENCY CAN BE MADE BY CREATING MULTIPLY INSTANCES WITH THE SAME NAMES
         this.batch_size = batch_size;
         this.batch_sync = batch_sync;
+        this.delete_event = delete_event;
 
         this.worker = worker;
         this.onComplete = onComplete;
@@ -249,16 +251,18 @@ class RedisStreams {
                 }
                 else {
                     const [, , [, size], , [, [pending]]] = await this.redis
-                    .multi()
-                    .xack(stream, group, message_id)
-                    //.xdel(stream, message_id)
-                    .srem(`${stream}:${DEDUPESET}`, task_id)
-                    .xlen(stream)
-                    .xgroup('CREATE', stream, group, 0)
-                    .xpending(stream, group)
-                    .exec();
+                        .multi()
+                        .xack(stream, group, message_id)
+                        .srem(`${stream}:${DEDUPESET}`, task_id)
+                        .xlen(stream)
+                        .xgroup('CREATE', stream, group, 0)
+                        .xpending(stream, group)
+                        .xdel(stream, this.delete_event ? message_id : '')
+                        .exec();
 
-                    this.onComplete({ state: 'COMPLETE', result, stream, group, consumer, message_id, event, errors, size, pending });
+                    const calculated_size = this.delete_event ? size - 1 : size;
+
+                    this.onComplete({ state: 'COMPLETE', result, stream, group, consumer, message_id, event, errors, size: calculated_size, pending });
                 }
             }).catch(async (error) => {
                 error = prettyError(error);
@@ -288,14 +292,16 @@ class RedisStreams {
                     const [, , [, size], , [, [pending]]] = await this.redis
                         .multi()
                         .xack(stream, group, message_id)
-                        //.xdel(stream, message_id)
                         .srem(`${stream}:${DEDUPESET}`, task_id)
                         .xlen(stream)
                         .xgroup('CREATE', stream, group, 0)
                         .xpending(stream, group)
+                        .xdel(stream, this.delete_event ? message_id : '')
                         .exec();
 
-                    this.onComplete({ state: 'ERROR', error, stream, group, consumer, message_id, event, errors, size, pending });
+                    const calculated_size = this.delete_event ? size - 1 : size;
+
+                    this.onComplete({ state: 'ERROR', error, stream, group, consumer, message_id, event, errors, size: calculated_size, pending });
                 }
             });
         }
