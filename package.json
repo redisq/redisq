@@ -1,6 +1,6 @@
 {
   "name": "redis-streams-queue",
-  "version": "2.0.5",
+  "version": "2.1.0",
   "description": "Redis Streams Queue",
   "main": "queue.js",
   "scripts": {
