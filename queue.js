@@ -311,8 +311,6 @@ class RedisStreams {
                 else {
                     this._process({ stream, group, consumer, data });
                 }
-            }).catch(error => {
-                this.redis.xgroup('CREATE', stream, group, 0);
             });
 
             await sleep(timeout || this.loop_interval);
@@ -321,7 +319,7 @@ class RedisStreams {
 
     async listen({ stream, group, consumer, id = 0, timeout }) {
         const start = () => {
-            this.go({ stream, group, consumer, id, timeout });
+            this.go({ stream, group, consumer, id, timeout }).catch(() => {});
 
             return () => this.streams[`${stream}.${group}.${consumer}`] = false;
         };
